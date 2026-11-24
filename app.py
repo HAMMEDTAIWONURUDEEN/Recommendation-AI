@@ -1,1026 +1,412 @@
 
-import streamlit as st
-import pandas as pd
+import html
+from pathlib import Path
+
 import joblib
+import numpy as np
+import pandas as pd
+import streamlit as st
 
-
-# =====================================================
-# 1. PAGE CONFIGURATION
-# =====================================================
-
-st.set_page_config(
-    page_title="CardioPredict AI",
-    page_icon="💚",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from sklearn.feature_extraction.text import (
+    TfidfVectorizer,
+    ENGLISH_STOP_WORDS
 )
+from sklearn.metrics.pairwise import cosine_similarity
 
 
-# =====================================================
-# 2. APPLICATION DESIGN
-# =====================================================
+# ---------- Page setup ----------
+st.set_page_config(
+    page_title="Course Recommender",
+    page_icon="🎓",
+    layout="wide"
+)
 
 st.markdown("""
 <style>
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-.stApp {
-    background: #07110F;
-    color: #E8F5EF;
-    font-family: 'Inter', sans-serif;
-}
-
 .block-container {
-    max-width: 1450px;
     padding-top: 2rem;
-    padding-bottom: 3rem;
 }
 
-section[data-testid="stSidebar"] {
-    background: #0B1915;
-    border-right: 1px solid #1D3B30;
+.hero {
+    background: linear-gradient(135deg, #1e3a8a, #3b82f6);
+    padding: 2rem;
+    border-radius: 16px;
+    color: white;
+    margin-bottom: 1.5rem;
 }
 
-section[data-testid="stSidebar"] * {
-    color: #E8F5EF;
+.hero h1 {
+    margin: 0;
+    color: white;
 }
 
-h1, h2, h3 {
-    color: #F0FFF8 !important;
-    font-weight: 700 !important;
+.hero p {
+    margin: 0.5rem 0 0 0;
+    opacity: 0.9;
 }
 
-.stNumberInput label,
-.stSelectbox label {
-    color: #C5DED0 !important;
+.badge {
+    display: inline-block;
+    padding: 2px 10px;
+    margin-right: 6px;
+    border-radius: 999px;
+    background: #e0e7ff;
+    color: #1e3a8a;
+    font-size: 0.8rem;
 }
-
-.stNumberInput input,
-.stSelectbox div[data-baseweb="select"] {
-    background: #10251C !important;
-    color: #F0FFF8 !important;
-    border-color: #315D48 !important;
-}
-
-.stButton button,
-.stFormSubmitButton button {
-    background: linear-gradient(90deg, #17B879, #26D99A) !important;
-    color: #04140D !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 700 !important;
-    min-height: 45px;
-}
-
-.stButton button:hover,
-.stFormSubmitButton button:hover {
-    background: #42E6A9 !important;
-}
-
-div[data-testid="stMetric"] {
-    background: #10221B;
-    border: 1px solid #234737;
-    border-radius: 15px;
-    padding: 18px;
-}
-
-div[data-testid="stMetricLabel"] {
-    color: #91B3A2;
-}
-
-div[data-testid="stMetricValue"] {
-    color: #39D99B;
-}
-
-hr {
-    border-color: #234737 !important;
-}
-
 </style>
 """, unsafe_allow_html=True)
 
 
-# =====================================================
-# 3. LOAD THE TRAINED MODEL AND SCALER
-# =====================================================
+# ---------- Load saved files ----------
+BASE_DIR = Path(__file__).resolve().parent
+
 
 @st.cache_resource
-def load_model():
+def load_assets():
 
-    model = joblib.load("heart_attack_model.pkl")
+    df_path = BASE_DIR / "courses_df.joblib"
+    sim_path = BASE_DIR / "sim.joblib"
 
-    scaler = joblib.load("heart_attack_scaler.pkl")
+    if not df_path.exists():
+        raise FileNotFoundError(
+            "courses_df.joblib was not found in the project folder."
+        )
 
-    return model, scaler
+    if not sim_path.exists():
+        raise FileNotFoundError(
+            "sim.joblib was not found in the project folder."
+        )
+
+    df = joblib.load(df_path)
+    sim = joblib.load(sim_path)
+
+    # Reset index to keep DataFrame positions aligned
+    # with the rows and columns of the similarity matrix.
+    df = df.reset_index(drop=True)
+
+    # Ensure the required columns exist.
+    required_columns = [
+        "course_title",
+        "course_organization",
+        "course_difficulty",
+        "course_rating"
+    ]
+
+    for column in required_columns:
+        if column not in df.columns:
+            raise ValueError(f"Missing required column: {column}")
+
+    # Recreate the text used during model training.
+    if "text" not in df.columns:
+        df["text"] = df["course_title"].fillna("").str.lower()
+
+    # Rebuild TF-IDF using the same settings as the original model.
+    extra_words = {
+        "course", "crash", "introduction", "intro", "using"
+    }
+
+    custom_stops = list(
+        ENGLISH_STOP_WORDS.union(extra_words)
+    )
+
+    tfidf = TfidfVectorizer(
+        stop_words=custom_stops,
+        ngram_range=(1, 2)
+    )
+
+    X = tfidf.fit_transform(df["text"].fillna(""))
+
+    # Confirm that the saved similarity matrix matches the dataset.
+    sim = np.asarray(sim)
+
+    if sim.shape != (len(df), len(df)):
+        raise ValueError(
+            "The similarity matrix dimensions do not match "
+            "the course dataset. Please regenerate sim.joblib."
+        )
+
+    # Prepare ratings.
+    df["course_rating"] = pd.to_numeric(
+        df["course_rating"], errors="coerce"
+    )
+
+    return df, sim, X, tfidf
 
 
 try:
-
-    model, scaler = load_model()
+    df, sim, X, tfidf = load_assets()
 
 except Exception as error:
-
-    st.error("The model or scaler could not be loaded.")
-
-    st.exception(error)
-
+    st.error(f"Could not load recommendation model: {error}")
     st.stop()
 
 
-# =====================================================
-# 4. REUSABLE DESIGN FUNCTIONS
-# =====================================================
+# ---------- Recommendation logic ----------
+def rank(
+    scores,
+    exclude_idx,
+    n,
+    difficulty,
+    rating_weight
+):
 
-def render_html(content):
+    # Start with all course positions.
+    candidate_indices = np.arange(len(df))
 
-    st.html(content)
+    # Exclude the selected course itself.
+    if exclude_idx is not None:
+        candidate_indices = candidate_indices[
+            candidate_indices != exclude_idx
+        ]
 
+    # Keep courses with positive similarity.
+    candidate_indices = candidate_indices[
+        scores[candidate_indices] > 0
+    ]
 
-def page_header(label, title, description):
+    if len(candidate_indices) == 0:
+        return pd.DataFrame()
 
-    render_html(f"""
-    <div style="
-        background: linear-gradient(120deg, #102B21, #0B1915);
-        border: 1px solid #24523E;
-        border-radius: 20px;
-        padding: 32px;
-        margin-bottom: 25px;
-    ">
+    # Filter difficulty before ranking.
+    if difficulty != "Any":
 
-        <div style="
-            color: #39D99B;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 2px;
-        ">
-            {label}
-        </div>
+        difficulty_values = (
+            df["course_difficulty"]
+            .fillna("")
+            .str.lower()
+        )
 
-        <div style="
-            font-size: 34px;
-            font-weight: 800;
-            color: #F0FFF8;
-            margin-top: 12px;
-            margin-bottom: 10px;
-        ">
-            {title}
-        </div>
+        candidate_indices = candidate_indices[
+            difficulty_values.iloc[candidate_indices].values
+            == difficulty.lower()
+        ]
 
-        <div style="
-            color: #A7C7B7;
-            font-size: 14px;
-            line-height: 1.8;
-            max-width: 750px;
-        ">
-            {description}
-        </div>
+    if len(candidate_indices) == 0:
+        return pd.DataFrame()
 
-    </div>
-    """)
+    result = df.iloc[candidate_indices].copy()
 
+    result["similarity"] = scores[candidate_indices]
 
-def section_heading(title, description):
+    # Normalize course ratings.
+    r_min = df["course_rating"].min()
+    r_max = df["course_rating"].max()
 
-    render_html(f"""
-    <div style="margin-top: 28px; margin-bottom: 18px;">
+    if pd.isna(r_min) or pd.isna(r_max):
+        result["rating_norm"] = 0.5
 
-        <div style="
-            color: #F0FFF8;
-            font-size: 21px;
-            font-weight: 700;
-        ">
-            {title}
-        </div>
+    elif r_max == r_min:
+        result["rating_norm"] = 0.5
 
-        <div style="
-            color: #91B3A2;
-            font-size: 12px;
-            margin-top: 7px;
-        ">
-            {description}
-        </div>
+    else:
+        result["rating_norm"] = (
+            (result["course_rating"] - r_min)
+            / (r_max - r_min)
+        )
 
-    </div>
-    """)
+    result["rating_norm"] = result["rating_norm"].fillna(0.5)
 
-
-def info_card(title, description, icon):
-
-    render_html(f"""
-    <div style="
-        background: #10221B;
-        border: 1px solid #234737;
-        border-radius: 16px;
-        padding: 23px;
-        min-height: 150px;
-    ">
-
-        <div style="font-size: 25px; margin-bottom: 15px;">
-            {icon}
-        </div>
-
-        <div style="
-            color: #F0FFF8;
-            font-size: 17px;
-            font-weight: 700;
-            margin-bottom: 10px;
-        ">
-            {title}
-        </div>
-
-        <div style="
-            color: #91B3A2;
-            font-size: 12px;
-            line-height: 1.8;
-        ">
-            {description}
-        </div>
-
-    </div>
-    """)
-
-
-def disclaimer():
-
-    render_html("""
-    <div style="
-        background: #211F14;
-        border: 1px solid #685B28;
-        border-radius: 12px;
-        padding: 16px;
-        color: #DCCB8D;
-        font-size: 12px;
-        line-height: 1.8;
-        margin-top: 22px;
-    ">
-        <strong>Important medical notice:</strong>
-        This application has not been clinically validated.
-        Its model output is not a medical diagnosis and must not
-        be used to confirm or rule out a heart attack or make
-        treatment decisions. Seek emergency medical care if
-        heart attack symptoms are suspected, regardless of the
-        model output.
-    </div>
-    """)
-
-
-# =====================================================
-# 5. SIDEBAR
-# =====================================================
-
-with st.sidebar:
-
-    render_html("""
-    <div style="padding: 15px 5px 25px 5px;">
-
-        <div style="
-            font-size: 25px;
-            font-weight: 800;
-            color: #F0FFF8;
-        ">
-            💚 CardioPredict
-            <span style="color: #39D99B;">AI</span>
-        </div>
-
-        <div style="
-            color: #7FA891;
-            font-size: 10px;
-            margin-top: 7px;
-            letter-spacing: 1px;
-        ">
-            MACHINE LEARNING HEALTH ANALYTICS
-        </div>
-
-    </div>
-    """)
-
-    st.markdown("---")
-
-    st.markdown("##### NAVIGATION")
-
-    page = st.radio(
-        "Choose a section",
-        [
-            "Overview",
-            "Prediction Dashboard",
-            "About the Model"
-        ],
-        label_visibility="collapsed"
+    # Combine similarity and rating.
+    result["score"] = (
+        (1 - rating_weight) * result["similarity"]
+        + rating_weight * result["rating_norm"]
     )
 
-    st.markdown("---")
-
-    render_html("""
-    <div style="
-        background: #10251C;
-        padding: 17px;
-        border-radius: 12px;
-    ">
-
-        <div style="
-            color: #39D99B;
-            font-size: 11px;
-            font-weight: 700;
-        ">
-            SYSTEM STATUS
-        </div>
-
-        <div style="
-            color: #E8F5EF;
-            font-size: 13px;
-            margin-top: 12px;
-        ">
-            ● Model loaded
-        </div>
-
-        <div style="
-            color: #91B3A2;
-            font-size: 11px;
-            margin-top: 7px;
-        ">
-            Random Forest Classifier
-        </div>
-
-    </div>
-    """)
-
-    st.markdown("---")
-
-    st.caption("CARDIOPREDICT AI · HEALTH ANALYTICS")
-
-
-# =====================================================
-# 6. OVERVIEW PAGE
-# =====================================================
-
-if page == "Overview":
-
-    page_header(
-        "CARDIOVASCULAR HEALTH ANALYTICS",
-        "Smarter Health Data Analysis.",
-        "Explore a machine-learning demonstration that analyses "
-        "eight cardiovascular-related input features and produces "
-        "a classification based on its training dataset."
+    return (
+        result.sort_values("score", ascending=False)
+        .head(n)
     )
 
-    section_heading(
-        "System overview",
-        "An overview of the technology powering this application."
-    )
 
-    col1, col2, col3 = st.columns(3)
+# ---------- Display recommendation cards ----------
+def show_cards(results):
 
-    with col1:
+    for _, row in results.iterrows():
 
-        st.metric(
-            label="MACHINE LEARNING MODEL",
-            value="Random Forest",
-            delta="Classification"
-        )
+        with st.container(border=True):
 
-    with col2:
+            left, right = st.columns([4, 1])
 
-        st.metric(
-            label="INPUT FEATURES",
-            value="08",
-            delta="Model variables"
-        )
+            with left:
 
-    with col3:
+                st.markdown(f"**{row['course_title']}**")
 
-        st.metric(
-            label="PREPROCESSING",
-            value="StandardScaler",
-            delta="Saved scaler"
-        )
-
-    section_heading(
-        "Explore the system",
-        "Discover the main components of CardioPredict AI."
-    )
-
-    left, right = st.columns(2)
-
-    with left:
-
-        info_card(
-            "Cardiovascular Assessment",
-            "Enter the eight model features and obtain a "
-            "classification from the trained machine-learning model.",
-            "♥"
-        )
-
-        st.write("")
-
-        if st.button(
-            "Open Prediction Dashboard",
-            use_container_width=True
-        ):
-
-            st.session_state["page"] = "Prediction Dashboard"
-
-            st.rerun()
-
-    with right:
-
-        info_card(
-            "Model Information",
-            "Explore the Random Forest algorithm, input features "
-            "and preprocessing pipeline.",
-            "◈"
-        )
-
-        st.write("")
-
-        if st.button(
-            "Explore Model Information",
-            use_container_width=True
-        ):
-
-            st.session_state["page"] = "About the Model"
-
-            st.rerun()
-
-    disclaimer()
-
-
-# =====================================================
-# 7. PREDICTION DASHBOARD
-# =====================================================
-
-elif page == "Prediction Dashboard":
-
-    page_header(
-        "MODEL PREDICTION CENTRE",
-        "Cardiovascular Assessment.",
-        "Provide the input values below to run a prediction "
-        "using the trained Random Forest model."
-    )
-
-    section_heading(
-        "Patient input parameters",
-        "Enter values using the same units and format as the original dataset."
-    )
-
-    with st.form("prediction_form"):
-
-        render_html("""
-        <div style="
-            color: #39D99B;
-            font-size: 12px;
-            font-weight: 700;
-            margin-bottom: 15px;
-        ">
-            01 · PERSONAL INFORMATION
-        </div>
-        """)
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-
-            age = st.number_input(
-                "Age",
-                min_value=1,
-                max_value=120,
-                value=30,
-                step=1
-            )
-
-        with col2:
-
-            gender = st.selectbox(
-                "Gender",
-                ["Male", "Female"]
-            )
-
-        st.markdown("---")
-
-        render_html("""
-        <div style="
-            color: #39D99B;
-            font-size: 12px;
-            font-weight: 700;
-            margin-bottom: 15px;
-        ">
-            02 · CARDIOVASCULAR INDICATORS
-        </div>
-        """)
-
-        col3, col4 = st.columns(2)
-
-        with col3:
-
-            heart_rate = st.number_input(
-                "Heart Rate",
-                min_value=0.0,
-                value=75.0,
-                step=1.0
-            )
-
-            systolic_bp = st.number_input(
-                "Systolic Blood Pressure",
-                min_value=0.0,
-                value=120.0,
-                step=1.0
-            )
-
-            diastolic_bp = st.number_input(
-                "Diastolic Blood Pressure",
-                min_value=0.0,
-                value=80.0,
-                step=1.0
-            )
-
-        with col4:
-
-            blood_sugar = st.number_input(
-                "Blood Sugar",
-                min_value=0.0,
-                value=100.0,
-                step=1.0
-            )
-
-            ck_mb = st.number_input(
-                "CK-MB",
-                min_value=0.0,
-                value=2.0,
-                step=0.1
-            )
-
-            troponin = st.number_input(
-                "Troponin",
-                min_value=0.0,
-                value=0.01,
-                step=0.01,
-                format="%.4f"
-            )
-
-        st.markdown("---")
-
-        submitted = st.form_submit_button(
-            "Run Model Prediction",
-            use_container_width=True
-        )
-
-    if submitted:
-
-        gender_value = 1 if gender == "Male" else 0
-
-        input_data = pd.DataFrame(
-            [[
-                age,
-                gender_value,
-                heart_rate,
-                systolic_bp,
-                diastolic_bp,
-                blood_sugar,
-                ck_mb,
-                troponin
-            ]],
-            columns=[
-                "Age",
-                "Gender",
-                "Heart rate",
-                "Systolic blood pressure",
-                "Diastolic blood pressure",
-                "Blood sugar",
-                "CK-MB",
-                "Troponin"
-            ]
-        )
-
-        try:
-
-            # Transform input using the saved scaler
-
-            scaled_input = scaler.transform(input_data)
-
-            # Generate model prediction
-
-            prediction = int(
-                model.predict(scaled_input)[0]
-            )
-
-            # Prepare classification information
-
-            if prediction == 1:
-
-                result_title = "Positive Classification"
-
-                result_description = (
-                    "The model classified the submitted input "
-                    "as positive according to the target labels "
-                    "in its training dataset."
+                organization = html.escape(
+                    str(row["course_organization"])
                 )
 
-                result_color = "#FF7777"
-                result_background = "#251A1A"
-                result_border = "#A84A4A"
-                result_status = "POSITIVE"
+                difficulty = html.escape(
+                    str(row["course_difficulty"])
+                )
+
+                rating = (
+                    f"{row['course_rating']:.2f}"
+                    if pd.notna(row["course_rating"])
+                    else "N/A"
+                )
+
+                st.markdown(
+                    f"<span class='badge'>{organization}</span>"
+                    f"<span class='badge'>{difficulty}</span>"
+                    f"<span class='badge'>⭐ {rating}</span>",
+                    unsafe_allow_html=True
+                )
+
+            with right:
+
+                st.metric(
+                    "Match",
+                    f"{row['similarity'] * 100:.0f}%"
+                )
+
+
+# ---------- Header ----------
+st.markdown("""
+<div class="hero">
+    <h1>🎓 Course Recommender</h1>
+    <p>
+        Find courses similar to one you like, or search by topic.
+        Built with TF-IDF and cosine similarity.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ---------- Sidebar filters ----------
+with st.sidebar:
+
+    st.header("Filters")
+
+    difficulty_options = (
+        df["course_difficulty"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    difficulty_options = ["Any"] + sorted(difficulty_options)
+
+    difficulty = st.selectbox(
+        "Difficulty",
+        difficulty_options
+    )
+
+    n = st.slider(
+        "Number of results",
+        3, 10, 5
+    )
+
+    rating_weight = st.slider(
+        "Importance of course rating",
+        0.0, 0.5, 0.2, 0.05
+    )
+
+    st.caption(
+        "Higher rating importance favours well-rated courses "
+        "among similar ones."
+    )
+
+
+# ---------- Tabs ----------
+tab1, tab2 = st.tabs([
+    "📚 Similar to a course",
+    "🔎 Search by topic"
+])
+
+
+# ---------- Tab 1: Similar course recommendations ----------
+with tab1:
+
+    idx = st.selectbox(
+        "Choose a course",
+
+        options=df.index.tolist(),
+
+        format_func=lambda i: (
+            f"{df.loc[i, 'course_title']} "
+            f"({df.loc[i, 'course_organization']})"
+        )
+    )
+
+    if st.button(
+        "Recommend",
+        key="btn_course",
+        type="primary"
+    ):
+
+        # Retrieve precomputed similarities.
+        scores = sim[idx]
+
+        results = rank(
+            scores,
+            idx,
+            n,
+            difficulty,
+            rating_weight
+        )
+
+        if results.empty:
+
+            st.warning(
+                "No similar courses found at that difficulty. "
+                "Try selecting 'Any'."
+            )
+
+        else:
+
+            st.subheader("Recommended courses")
+            show_cards(results)
+
+
+# ---------- Tab 2: Search by topic ----------
+with tab2:
+
+    query = st.text_input(
+        "What do you want to learn?",
+        placeholder="e.g. machine learning, cybersecurity, python"
+    )
+
+    if st.button(
+        "Search",
+        key="btn_topic",
+        type="primary"
+    ):
+
+        if not query.strip():
+
+            st.warning("Please type a topic first.")
+
+        else:
+
+            # Convert the user's search into a TF-IDF vector.
+            vec = tfidf.transform([query.lower()])
+
+            # Compare the query with every course.
+            scores = cosine_similarity(vec, X).ravel()
+
+            results = rank(
+                scores,
+                None,
+                n,
+                difficulty,
+                rating_weight
+            )
+
+            if results.empty:
+
+                st.warning(
+                    "No matches found. Try different search words."
+                )
 
             else:
 
-                result_title = "Negative Classification"
-
-                result_description = (
-                    "The model classified the submitted input "
-                    "as negative according to the target labels "
-                    "in its training dataset."
-                )
-
-                result_color = "#39D99B"
-                result_background = "#10291F"
-                result_border = "#27875B"
-                result_status = "NEGATIVE"
-
-            # Display assessment results
-
-            section_heading(
-                "Assessment Results",
-                "Classification generated by the trained machine-learning model."
-            )
-
-            render_html(f"""
-            <div style="
-                background: {result_background};
-                border: 1px solid {result_border};
-                border-radius: 18px;
-                padding: 30px;
-                margin-top: 10px;
-            ">
-
-                <div style="
-                    color: {result_color};
-                    font-size: 12px;
-                    font-weight: 700;
-                    letter-spacing: 2px;
-                ">
-                    MODEL CLASSIFICATION
-                </div>
-
-                <div style="
-                    color: #F0FFF8;
-                    font-size: 30px;
-                    font-weight: 800;
-                    margin-top: 15px;
-                ">
-                    {result_title}
-                </div>
-
-                <div style="
-                    color: #B7CEC1;
-                    font-size: 14px;
-                    line-height: 1.9;
-                    margin-top: 15px;
-                    max-width: 800px;
-                ">
-                    {result_description}
-                </div>
-
-                <div style="
-                    display: inline-block;
-                    background: {result_background};
-                    border: 1px solid {result_border};
-                    border-radius: 7px;
-                    padding: 7px 13px;
-                    margin-top: 20px;
-                    color: {result_color};
-                    font-size: 11px;
-                    font-weight: 700;
-                    letter-spacing: 1px;
-                ">
-                    {result_status}
-                </div>
-
-            </div>
-            """)
-
-            # Display assessment summary
-
-            st.markdown("")
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-
-                st.metric(
-                    label="INPUT FEATURES",
-                    value="08"
-                )
-
-            with col2:
-
-                st.metric(
-                    label="MODEL",
-                    value="Random Forest"
-                )
-
-            with col3:
-
-                st.metric(
-                    label="OUTPUT CLASS",
-                    value=result_status
-                )
-
-            # Display submitted input values
-
-            with st.expander("View submitted input values"):
-
-                display_data = input_data.copy()
-
-                display_data["Gender"] = gender
-
-                st.dataframe(
-                    display_data,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            # Generate downloadable assessment report
-
-            report = f"""
-CARDIOPREDICT AI
-CARDIOVASCULAR ASSESSMENT REPORT
-
-========================================
-
-ASSESSMENT RESULT
-
-Model Classification: {result_title}
-
-Output Class: {result_status}
-
-========================================
-
-SUBMITTED INPUT VALUES
-
-Age: {age}
-Gender: {gender}
-Heart Rate: {heart_rate}
-Systolic Blood Pressure: {systolic_bp}
-Diastolic Blood Pressure: {diastolic_bp}
-Blood Sugar: {blood_sugar}
-CK-MB: {ck_mb}
-Troponin: {troponin}
-
-========================================
-
-MODEL INFORMATION
-
-Algorithm: Random Forest Classifier
-Input Features: 8
-Preprocessing: StandardScaler
-
-========================================
-
-IMPORTANT MEDICAL NOTICE
-
-This application has not been clinically validated.
-
-The model classification is not a medical diagnosis.
-It cannot confirm or rule out a heart attack and must
-not be used to make treatment decisions.
-
-If heart attack symptoms are suspected, seek emergency
-medical care immediately, regardless of this model output.
-
-========================================
-
-CardioPredict AI
-Built with Python, Streamlit and Scikit-learn.
-"""
-
-            st.markdown("")
-
-            st.download_button(
-                label="Download Assessment Report",
-                data=report,
-                file_name="CardioPredict_Assessment_Report.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-
-            # Medical safety notice
-
-            render_html("""
-            <div style="
-                background: #211F14;
-                border: 1px solid #685B28;
-                border-radius: 12px;
-                padding: 18px;
-                color: #DCCB8D;
-                font-size: 12px;
-                line-height: 1.9;
-                margin-top: 22px;
-            ">
-
-                <strong>Important Medical Notice</strong>
-
-                <br><br>
-
-                This application has not been clinically validated.
-                Its model output is not a medical diagnosis and
-                cannot confirm or rule out a heart attack.
-
-                <br><br>
-
-                A negative classification does not guarantee that
-                someone is free from a heart condition. If heart
-                attack symptoms are suspected, seek emergency
-                medical care regardless of the model output.
-
-            </div>
-            """)
-
-        except Exception as error:
-
-            st.error("Prediction failed.")
-
-            st.exception(error)
-
-
-# =====================================================
-# 8. ABOUT THE MODEL PAGE
-# =====================================================
-
-elif page == "About the Model":
-
-    page_header(
-        "TECHNICAL INFORMATION",
-        "Inside the Machine Learning Model.",
-        "Understand the algorithm, features and preprocessing "
-        "steps used by this application."
-    )
-
-    section_heading(
-        "Model architecture",
-        "The machine-learning technology behind the predictions."
-    )
-
-    info_card(
-        "Random Forest Classifier",
-        "A supervised machine-learning algorithm that combines "
-        "multiple decision trees to produce a classification.",
-        "🧠"
-    )
-
-    section_heading(
-        "Model configuration",
-        "The model configuration used in the training project."
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.metric(
-            "Algorithm",
-            "Random Forest"
-        )
-
-        st.metric(
-            "Maximum Tree Depth",
-            "10"
-        )
-
-    with col2:
-
-        st.metric(
-            "Minimum Samples Split",
-            "5"
-        )
-
-        st.metric(
-            "Random State",
-            "42"
-        )
-
-    section_heading(
-        "Input features",
-        "The eight variables expected by the trained model."
-    )
-
-    features = [
-        "Age",
-        "Gender",
-        "Heart rate",
-        "Systolic blood pressure",
-        "Diastolic blood pressure",
-        "Blood sugar",
-        "CK-MB",
-        "Troponin"
-    ]
-
-    for index, feature in enumerate(features, start=1):
-
-        render_html(f"""
-        <div style="
-            background: #10221B;
-            border: 1px solid #234737;
-            border-radius: 10px;
-            padding: 15px;
-            margin-bottom: 9px;
-        ">
-
-            <span style="
-                color: #39D99B;
-                font-weight: 700;
-            ">
-                {index:02d}
-            </span>
-
-            <span style="
-                color: #E8F5EF;
-                margin-left: 15px;
-                font-size: 13px;
-            ">
-                {feature}
-            </span>
-
-        </div>
-        """)
-
-    section_heading(
-        "Prediction pipeline",
-        "How the application processes an input."
-    )
-
-    pipeline_steps = [
-        ("01", "Input collection", "The user enters eight feature values."),
-        ("02", "Data preparation", "The application creates a DataFrame in the correct feature order."),
-        ("03", "Feature scaling", "The saved StandardScaler transforms the input."),
-        ("04", "Model inference", "The trained Random Forest processes the transformed input."),
-        ("05", "Classification", "The model returns its predicted class.")
-    ]
-
-    for number, title, description in pipeline_steps:
-
-        render_html(f"""
-        <div style="
-            background: #10221B;
-            border: 1px solid #234737;
-            border-radius: 12px;
-            padding: 17px;
-            margin-bottom: 10px;
-        ">
-
-            <div style="
-                color: #39D99B;
-                font-size: 11px;
-                font-weight: 700;
-            ">
-                STEP {number}
-            </div>
-
-            <div style="
-                color: #F0FFF8;
-                font-size: 16px;
-                font-weight: 700;
-                margin-top: 7px;
-            ">
-                {title}
-            </div>
-
-            <div style="
-                color: #91B3A2;
-                font-size: 12px;
-                margin-top: 6px;
-            ">
-                {description}
-            </div>
-
-        </div>
-        """)
-
-    disclaimer()
-
-
-# =====================================================
-# 9. FOOTER
-# =====================================================
-
-st.markdown("---")
-
-render_html("""
-<div style="
-    text-align: center;
-    color: #668777;
-    font-size: 11px;
-    padding: 15px;
-    line-height: 2;
-">
-
-    <strong>CARDIOPREDICT AI</strong>
-
-    <br>
-
-    Built with Python, Streamlit and Scikit-learn.
-
-    <br>
-
-    Cardiovascular Data Analysis · Not a medical diagnostic system.
-
-</div>
-""")
+                st.subheader(f"Courses for: {query}")
+                show_cards(results)
+
+
+# ---------- Footer ----------
+st.caption(
+    "Content-based recommender: similarity is calculated "
+    "from course titles."
+)
